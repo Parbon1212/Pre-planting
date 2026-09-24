@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>植林予定区画 検討ツール</title>
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem("theme");
+    var theme = stored || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  } catch (e) {}
+})();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <header class="panel-header">
+      <div>
+        <h1>植林予定区画 検討ツール</h1>
+        <p class="subtitle">区画の位置・寸法を設計し、面積を算出</p>
+      </div>
+      <button type="button" id="themeToggle" class="theme-toggle" title="ダークモード切替" aria-label="ダークモードに切り替え">🌙</button>
+    </header>
+    <p class="error" id="apiKeyError"></p>
+
+    <section class="card" id="controls" hidden>
+      <div class="card-block">
+        <h2 class="card-label">区画一覧</h2>
+        <div class="tab-bar" id="tabBar"></div>
+        <div class="row">
+          <button type="button" class="btn btn-primary" id="addRectPlotBtn">＋ 方形区画</button>
+          <button type="button" class="btn btn-primary" id="addDotsPlotBtn">＋ ドット配置</button>
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-destructive" id="deletePlotBtn">この区画を削除</button>
+        </div>
+      </div>
+
+      <div class="card-block" id="baseFields">
+        <h2 class="card-label">基準点</h2>
+        <div class="row">
+          <label class="field">緯度<input type="number" id="latInput" step="0.000001"></label>
+          <label class="field">経度<input type="number" id="lngInput" step="0.000001"></label>
+        </div>
+        <p class="hint">選択中の区画のマーカーをドラッグすると基準点を設定できます（地図のクリックでは変わりません）。方形は区画の角、ドットはグリッドの原点になります。</p>
+      </div>
+
+      <div class="card-block" id="rectFields">
+        <h2 class="card-label">区画の寸法（方形）</h2>
+        <p class="hint">🔒で値を1つ固定できます。固定した値は変わらず、残り2つが連動して再計算されます。</p>
+        <div class="row">
+          <label class="field">縦の長さ (m)
+            <span class="lockable">
+              <input type="number" id="heightInput" min="0" step="1">
+              <button type="button" class="lock-btn" data-field="height" title="縦を固定">🔓</button>
+            </span>
+          </label>
+          <label class="field">横の長さ (m)
+            <span class="lockable">
+              <input type="number" id="widthInput" min="0" step="1">
+              <button type="button" class="lock-btn" data-field="width" title="横を固定">🔓</button>
+            </span>
+          </label>
+        </div>
+        <div class="row">
+          <label class="field">面積 (ha)
+            <span class="lockable">
+              <input type="number" id="areaInput" min="0" step="0.01">
+              <button type="button" class="lock-btn" data-field="area" title="面積を固定">🔓</button>
+            </span>
+          </label>
+          <label class="field">回転角度 (°／北から時計回り)<input type="number" id="rotationInput" step="1" value="0"></label>
+        </div>
+      </div>
+
+      <div class="card-block" id="dotsFields" hidden>
+        <h2 class="card-label">配置の設定（ドット）</h2>
+        <p class="hint">基準点を原点として東方向に列、北方向に行を並べ、方位角で全体を回転します。</p>
+        <div class="row">
+          <label class="field">列方向の点間距離 (m)<input type="number" id="colSpacingInput" min="0" step="0.1"></label>
+          <label class="field">行方向の点間距離 (m)<input type="number" id="rowSpacingInput" min="0" step="0.1"></label>
+        </div>
+        <div class="row">
+          <label class="field">列数<input type="number" id="colsInput" min="1" step="1"></label>
+          <label class="field">行数<input type="number" id="rowsInput" min="1" step="1"></label>
+        </div>
+        <div class="row">
+          <label class="field">方位角 (°／北から時計回り)<input type="number" id="azimuthInput" step="1" value="0"></label>
+        </div>
+      </div>
+
+      <div class="card-block" id="resultSection">
+        <h2 class="card-label">算出結果（選択中の区画）</h2>
+        <div id="resultBox">
+          <p>面積 <span class="stat-value" id="resultArea">-</span><span class="unit">ha</span></p>
+          <p>周囲長 <span class="stat-value" id="resultPerimeter">-</span><span class="unit">m</span></p>
+          <p class="hint">4隅の座標（基準点から時計回り）</p>
+          <ol id="cornerList"></ol>
+        </div>
+        <div id="dotsResultBox" hidden>
+          <p>点数 <span class="stat-value" id="resultPointCount">-</span><span class="unit">点</span></p>
+          <p>配置範囲 <span class="stat-value" id="resultGridSize">-</span><span class="unit">m</span></p>
+          <p class="hint" id="dotsCapHint" hidden>点数が多いため、地図上の表示は先頭2000点までに制限されています。</p>
+          <p class="hint">グリッド範囲の4隅（基準点から時計回り）</p>
+          <ol id="dotsCornerList"></ol>
+        </div>
+      </div>
+
+      <div class="card-block">
+        <h2 class="card-label">全区画合計</h2>
+        <div id="totalBox">
+          <p><span class="badge badge-solid" id="resultPlotCount">-</span><span class="total-text">区画／合計</span><span class="stat-value" id="resultTotalArea">-</span><span class="unit">ha</span></p>
+        </div>
+        <p class="hint">ドット区画は配置範囲（点間の外接矩形）の面積を含みます。</p>
+      </div>
+    </section>
+  </aside>
+
+  <main id="map"></main>
+</div>
+
+<script src="app.js"></script>
+<script>
+(function () {
+  var btn = document.getElementById("themeToggle");
+  function updateIcon(theme) {
+    btn.textContent = theme === "dark" ? "☀️" : "🌙";
+    btn.setAttribute("aria-label", theme === "dark" ? "ライトモードに切り替え" : "ダークモードに切り替え");
+  }
+  updateIcon(document.documentElement.getAttribute("data-theme") || "light");
+  btn.addEventListener("click", function () {
+    var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("theme", next); } catch (e) {}
+    updateIcon(next);
+  });
+})();
+</script>
+</body>
+</html>
