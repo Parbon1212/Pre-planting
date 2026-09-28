@@ -1,7 +1,5 @@
 "use strict";
 
-const API_KEY = "AIzaSyBi4w2RapqTYpAudXkqBa2xAw54z18F5uY";
-
 const PLOT_COLORS = [
   "#ff6b00", "#1f77b4", "#2ca02c", "#d62728",
   "#9467bd", "#8c564b", "#e377c2", "#17becf",
@@ -58,11 +56,9 @@ function plotColor(plot) {
 }
 
 let map = null;
-let AreaLabelOverlay = null; // google.maps 読み込み後に定義するクラス
 const drawings = new Map(); // plotId -> { polygon, dotMarkers, label, marker }
 
 const el = {
-  apiKeyError: document.getElementById("apiKeyError"),
   controls: document.getElementById("controls"),
   tabBar: document.getElementById("tabBar"),
   addRectPlotBtn: document.getElementById("addRectPlotBtn"),
@@ -130,14 +126,22 @@ function rotateOffset(x, y, rotationDeg) {
 
 function offsetToLatLng(base, x, y) {
   const distance = Math.sqrt(x * x + y * y);
-  if (distance === 0) return new google.maps.LatLng(base.lat, base.lng);
-  let heading = (Math.atan2(x, y) * 180) / Math.PI; // atan2(東, 北)
-  if (heading < 0) heading += 360;
-  return google.maps.geometry.spherical.computeOffset(
-    new google.maps.LatLng(base.lat, base.lng),
-    distance,
-    heading
+  const heading = Math.atan2(x, y);
+  const angularDistance = distance / 6378137;
+  const latitude = (base.lat * Math.PI) / 180;
+  const longitude = (base.lng * Math.PI) / 180;
+  const targetLatitude = Math.asin(
+    Math.sin(latitude) * Math.cos(angularDistance) +
+      Math.cos(latitude) * Math.sin(angularDistance) * Math.cos(heading)
   );
+  const targetLongitude = longitude + Math.atan2(
+    Math.sin(heading) * Math.sin(angularDistance) * Math.cos(latitude),
+    Math.cos(angularDistance) - Math.sin(latitude) * Math.sin(targetLatitude)
+  );
+  return {
+    lat: (targetLatitude * 180) / Math.PI,
+    lng: (targetLongitude * 180) / Math.PI,
+  };
 }
 
 function computeCornersFromDims(base, width, height, rotationDeg) {
@@ -220,11 +224,7 @@ function round2(n) {
 }
 
 function recenterMap(lat, lng) {
-  // setCenterだけだと、環境によってタイルが灰色のまま再描画されないことがあるため、
-  // resizeイベントを強制発火してから centre を入れ直す（既知の回避策）。
-  map.setCenter({ lat, lng });
-  google.maps.event.trigger(map, "resize");
-  map.setCenter({ lat, lng });
+  map.setView([lat, lng], map.getZoom());
 }
 
 function syncLockUI() {
@@ -251,11 +251,9 @@ function setLock(field) {
 function removePlotDrawing(id) {
   const d = drawings.get(id);
   if (!d) return;
-  if (d.polygon) d.polygon.setMap(null);
-  if (d.marker) d.marker.setMap(null);
-  if (d.label) d.label.setMap(null);
-  if (d.dotMarkers) d.dotMarkers.forEach((m) => m.setMap(null));
-  if (d.rotateHandle) d.rotateHandle.setMap(null);
+  [d.polygon, d.marker, d.label, d.rotateHandle, ...(d.dotMarkers || [])]
+    .filter(Boolean)
+    .forEach((layer) => map.removeLayer(layer));
   drawings.delete(id);
 }
 
@@ -284,19 +282,25 @@ function getPlotAngle(plot) {
 
 function getRotateHandlePosition(plot) {
   const { radius, baseHeadingDeg } = computeRotateHandleGeometry(plot);
-  const base = new google.maps.LatLng(plot.lat, plot.lng);
-  return google.maps.geometry.spherical.computeOffset(
-    base,
-    radius,
-    normalizeAngle(baseHeadingDeg + getPlotAngle(plot))
+  const heading = (normalizeAngle(baseHeadingDeg + getPlotAngle(plot)) * Math.PI) / 180;
+  return offsetToLatLng(
+    plot,
+    radius * Math.sin(heading),
+    radius * Math.cos(heading)
   );
 }
 
 // ドラッグ中・ドラッグ終了の両方で呼ぶ：基準点からカーソル方向への方位角を採用し、
 // この区画だけ軽量に再描画する（他区画・タブ一覧は触らない）。
 function onRotateHandleDrag(plot, e) {
-  const base = new google.maps.LatLng(plot.lat, plot.lng);
-  const bearingToCursor = google.maps.geometry.spherical.computeHeading(base, e.latLng);
+  const latitude1 = (plot.lat * Math.PI) / 180;
+  const latitude2 = (e.latlng.lat * Math.PI) / 180;
+  const longitudeDelta = ((e.latlng.lng - plot.lng) * Math.PI) / 180;
+  const bearingToCursor = (Math.atan2(
+    Math.sin(longitudeDelta) * Math.cos(latitude2),
+    Math.cos(latitude1) * Math.sin(latitude2) -
+      Math.sin(latitude1) * Math.cos(latitude2) * Math.cos(longitudeDelta)
+  ) * 180) / Math.PI;
   const { baseHeadingDeg } = computeRotateHandleGeometry(plot);
   const newAngle = normalizeAngle(bearingToCursor - baseHeadingDeg);
 
@@ -314,38 +318,39 @@ function onRotateHandleDrag(plot, e) {
 
 function syncRotateHandle(plot, d, color, isActive) {
   if (!isActive) {
-    if (d.rotateHandle) d.rotateHandle.setMap(null);
+    if (d.rotateHandle) map.removeLayer(d.rotateHandle);
     return;
   }
 
   const handlePos = getRotateHandlePosition(plot);
   if (!d.rotateHandle) {
-    d.rotateHandle = new google.maps.Marker({
-      position: handlePos,
-      map,
+    d.rotateHandle = L.marker([handlePos.lat, handlePos.lng], {
       draggable: true,
-      zIndex: 30,
+      zIndexOffset: 1000,
       title: "ドラッグして角度を変更",
+      icon: L.divIcon({
+        className: "rotate-handle-icon",
+        html: '<span class="rotate-handle"></span>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8],
+      }),
     });
-    d.rotateHandle.addListener("drag", (e) => onRotateHandleDrag(plot, e));
-    d.rotateHandle.addListener("dragend", (e) => onRotateHandleDrag(plot, e));
-  } else {
-    d.rotateHandle.setPosition(handlePos);
-    d.rotateHandle.setMap(map);
+    d.rotateHandle.on("drag", (e) => onRotateHandleDrag(plot, e));
+    d.rotateHandle.on("dragend", (e) => onRotateHandleDrag(plot, e));
   }
-  d.rotateHandle.setIcon({
-    path: google.maps.SymbolPath.CIRCLE,
-    scale: 6,
-    fillColor: "#ffffff",
-    fillOpacity: 1,
-    strokeColor: color,
-    strokeWeight: 2,
-  });
+  d.rotateHandle.setLatLng([handlePos.lat, handlePos.lng]);
+  if (!map.hasLayer(d.rotateHandle)) d.rotateHandle.addTo(map);
+  d.rotateHandle.setIcon(L.divIcon({
+    className: "rotate-handle-icon",
+    html: `<span class="rotate-handle" style="border-color:${color}"></span>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  }));
 }
 
 function redrawDotsPlot(plot, d, color, isActive) {
   if (d.polygon) {
-    d.polygon.setMap(null);
+    map.removeLayer(d.polygon);
     d.polygon = null;
   }
 
@@ -354,86 +359,92 @@ function redrawDotsPlot(plot, d, color, isActive) {
 
   if (!d.dotMarkers) d.dotMarkers = [];
   while (d.dotMarkers.length < points.length) {
-    d.dotMarkers.push(new google.maps.Marker({ map, clickable: false }));
+    d.dotMarkers.push(L.circleMarker([0, 0], { interactive: false }).addTo(map));
   }
   while (d.dotMarkers.length > points.length) {
-    d.dotMarkers.pop().setMap(null);
+    map.removeLayer(d.dotMarkers.pop());
   }
 
-  const scale = isActive ? 4 : 2.5;
-  const fillOpacity = isActive ? 0.95 : 0.45;
   points.forEach((pos, idx) => {
     const marker = d.dotMarkers[idx];
-    marker.setPosition(pos);
-    marker.setMap(map);
-    marker.setZIndex(isActive ? 10 : 5);
-    marker.setIcon({
-      path: google.maps.SymbolPath.CIRCLE,
-      scale,
+    marker.setLatLng([pos.lat, pos.lng]);
+    marker.setStyle({
+      radius: isActive ? 4 : 2.5,
       fillColor: color,
-      fillOpacity,
-      strokeColor: color,
-      strokeWeight: 1,
+      fillOpacity: isActive ? 0.95 : 0.45,
+      color,
+      weight: 1,
     });
   });
 
-  if (!d.label) {
-    d.label = new AreaLabelOverlay();
-    d.label.setMap(map);
-  }
   const gridCorners = computeDotGridCorners(plot);
-  const centerLat = gridCorners.reduce((s, c) => s + c.lat(), 0) / gridCorners.length;
-  const centerLng = gridCorners.reduce((s, c) => s + c.lng(), 0) / gridCorners.length;
-  d.label.setPosition(new google.maps.LatLng(centerLat, centerLng));
-  d.label.setText(`${plotName(plot)}: ${plot.rows * plot.cols}点`);
-  d.label.setColor(color);
-  d.label.setActive(isActive);
+  const centerLat = gridCorners.reduce((sum, corner) => sum + corner.lat, 0) / gridCorners.length;
+  const centerLng = gridCorners.reduce((sum, corner) => sum + corner.lng, 0) / gridCorners.length;
+  updateAreaLabel(d, [centerLat, centerLng], `${plotName(plot)}: ${plot.rows * plot.cols}点`, color, isActive);
 
   syncRotateHandle(plot, d, color, isActive);
 }
 
+function updateAreaLabel(d, position, text, color, isActive) {
+  const labelHtml = document.createElement("div");
+  labelHtml.className = "area-label";
+  labelHtml.textContent = text;
+  labelHtml.style.borderColor = color;
+  labelHtml.style.opacity = isActive ? "1" : "0.6";
+  labelHtml.style.fontWeight = isActive ? "700" : "600";
+  const icon = L.divIcon({
+    className: "area-label-icon",
+    html: labelHtml,
+    iconSize: null,
+  });
+  if (!d.label) {
+    d.label = L.marker(position, { icon, interactive: false, zIndexOffset: 500 });
+  } else {
+    d.label.setLatLng(position);
+    d.label.setIcon(icon);
+  }
+  if (!map.hasLayer(d.label)) d.label.addTo(map);
+}
+
 function redrawRectPlot(plot, d, color, isActive) {
   if (d.dotMarkers && d.dotMarkers.length) {
-    d.dotMarkers.forEach((m) => m.setMap(null));
+    d.dotMarkers.forEach((marker) => map.removeLayer(marker));
     d.dotMarkers = [];
   }
 
   const corners = computeCorners(plot);
   const style = isActive
-    ? { strokeWeight: 3, strokeOpacity: 1, fillOpacity: 0.35, zIndex: 10 }
-    : { strokeWeight: 1.5, strokeOpacity: 0.6, fillOpacity: 0.12, zIndex: 5 };
+    ? { weight: 3, opacity: 1, fillOpacity: 0.35 }
+    : { weight: 1.5, opacity: 0.6, fillOpacity: 0.12 };
 
   if (!d.polygon) {
-    d.polygon = new google.maps.Polygon({
-      paths: corners,
-      strokeColor: color,
+    d.polygon = L.polygon(corners.map((corner) => [corner.lat, corner.lng]), {
+      color,
       fillColor: color,
-      map,
       ...style,
-    });
+    }).addTo(map);
   } else {
-    d.polygon.setPath(corners);
-    d.polygon.setOptions({ strokeColor: color, fillColor: color, ...style });
+    d.polygon.setLatLngs(corners.map((corner) => [corner.lat, corner.lng]));
+    d.polygon.setStyle({ color, fillColor: color, ...style });
   }
 
-  if (!d.label) {
-    d.label = new AreaLabelOverlay();
-    d.label.setMap(map);
-  }
-  const centerLat = corners.reduce((s, c) => s + c.lat(), 0) / corners.length;
-  const centerLng = corners.reduce((s, c) => s + c.lng(), 0) / corners.length;
-  d.label.setPosition(new google.maps.LatLng(centerLat, centerLng));
-  d.label.setText(`${plotName(plot)}: ${round2(areaHaOf(plot.width, plot.height))} ha`);
-  d.label.setColor(color);
-  d.label.setActive(isActive);
+  const centerLat = corners.reduce((sum, corner) => sum + corner.lat, 0) / corners.length;
+  const centerLng = corners.reduce((sum, corner) => sum + corner.lng, 0) / corners.length;
+  updateAreaLabel(
+    d,
+    [centerLat, centerLng],
+    `${plotName(plot)}: ${round2(areaHaOf(plot.width, plot.height))} ha`,
+    color,
+    isActive
+  );
 
   syncRotateHandle(plot, d, color, isActive);
 }
 
 // 基準点マーカーのドラッグ中・ドラッグ終了の両方で呼ぶ：位置を更新してこの区画だけ軽量に再描画する。
 function onBaseMarkerDrag(plot, e) {
-  plot.lat = e.latLng.lat();
-  plot.lng = e.latLng.lng();
+  plot.lat = e.latlng.lat;
+  plot.lng = e.latlng.lng;
   el.latInput.value = plot.lat.toFixed(6);
   el.lngInput.value = plot.lng.toFixed(6);
   redrawPlot(plot);
@@ -459,21 +470,22 @@ function redrawPlot(plot) {
   // 基準点マーカーは方形・ドット共通（ドラッグで基準点を移動）
   if (isActive) {
     if (!d.marker) {
-      d.marker = new google.maps.Marker({
-        position: { lat: plot.lat, lng: plot.lng },
-        map,
+      d.marker = L.marker([plot.lat, plot.lng], {
         draggable: true,
         title: plotName(plot),
       });
-      d.marker.addListener("drag", (e) => onBaseMarkerDrag(plot, e));
-      d.marker.addListener("dragend", (e) => onBaseMarkerDrag(plot, e));
+      d.marker.on("drag", (e) => onBaseMarkerDrag(plot, e));
+      d.marker.on("dragend", (e) => onBaseMarkerDrag(plot, e));
+      d.marker.addTo(map);
     } else {
-      d.marker.setPosition({ lat: plot.lat, lng: plot.lng });
-      d.marker.setMap(map);
-      d.marker.setTitle(plotName(plot));
+      d.marker.setLatLng([plot.lat, plot.lng]);
+      if (!map.hasLayer(d.marker)) d.marker.addTo(map);
+      const markerTitle = plotName(plot);
+      d.marker.options.title = markerTitle;
+      if (d.marker.getElement()) d.marker.getElement().setAttribute("title", markerTitle);
     }
   } else if (d.marker) {
-    d.marker.setMap(null);
+    map.removeLayer(d.marker);
   }
 }
 
@@ -499,7 +511,7 @@ function updateResultBox() {
     el.dotsCornerList.innerHTML = "";
     computeDotGridCorners(p).forEach((c) => {
       const li = document.createElement("li");
-      li.textContent = `${c.lat().toFixed(6)}, ${c.lng().toFixed(6)}`;
+      li.textContent = `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`;
       el.dotsCornerList.appendChild(li);
     });
     return;
@@ -512,7 +524,7 @@ function updateResultBox() {
   el.cornerList.innerHTML = "";
   computeCorners(p).forEach((c) => {
     const li = document.createElement("li");
-    li.textContent = `${c.lat().toFixed(6)}, ${c.lng().toFixed(6)}`;
+    li.textContent = `${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`;
     el.cornerList.appendChild(li);
   });
 }
@@ -525,12 +537,12 @@ function updateTotalArea() {
 
 function fitAllPlots() {
   if (plots.length === 0) return;
-  const bounds = new google.maps.LatLngBounds();
+  const bounds = L.latLngBounds([]);
   plots.forEach((plot) => {
     const corners = plot.type === "dots" ? computeDotGridCorners(plot) : computeCorners(plot);
-    corners.forEach((c) => bounds.extend(c));
+    corners.forEach((corner) => bounds.extend([corner.lat, corner.lng]));
   });
-  map.fitBounds(bounds, 80);
+  map.fitBounds(bounds, { padding: [40, 40] });
 }
 
 let dragSourcePlotId = null;
@@ -793,95 +805,57 @@ function wireControlEvents() {
   });
 }
 
-function loadGoogleMapsScript(apiKey) {
-  return new Promise((resolve, reject) => {
-    if (window.google && window.google.maps && window.google.maps.geometry) {
-      resolve();
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
-      apiKey
-    )}&libraries=geometry`;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () =>
-      reject(new Error("Google Maps の読み込みに失敗しました。APIキーを確認してください。"));
-    document.head.appendChild(script);
-  });
-}
-
-async function initMap(apiKey) {
-  el.apiKeyError.textContent = "";
-  try {
-    await loadGoogleMapsScript(apiKey);
-  } catch (err) {
-    el.apiKeyError.textContent = err.message;
-    return;
-  }
-
-  AreaLabelOverlay = class extends google.maps.OverlayView {
-    constructor() {
-      super();
-      this.div = null;
-      this.position = null;
-      this.text = "";
-      this.color = "#ff6b00";
-      this.active = true;
-    }
-    setPosition(latLng) {
-      this.position = latLng;
-      this.draw();
-    }
-    setText(text) {
-      this.text = text;
-      if (this.div) this.div.textContent = text;
-    }
-    setColor(color) {
-      this.color = color;
-      this.applyStyle();
-    }
-    setActive(active) {
-      this.active = active;
-      this.applyStyle();
-    }
-    applyStyle() {
-      if (!this.div) return;
-      this.div.style.borderColor = this.color;
-      this.div.style.opacity = this.active ? "1" : "0.6";
-      this.div.style.fontWeight = this.active ? "700" : "600";
-      this.div.style.zIndex = this.active ? "20" : "10";
-    }
-    onAdd() {
-      this.div = document.createElement("div");
-      this.div.className = "area-label";
-      this.div.textContent = this.text;
-      this.getPanes().floatPane.appendChild(this.div);
-      this.applyStyle();
-    }
-    draw() {
-      if (!this.div || !this.position) return;
-      const proj = this.getProjection();
-      if (!proj) return;
-      const pos = proj.fromLatLngToDivPixel(this.position);
-      this.div.style.left = `${pos.x}px`;
-      this.div.style.top = `${pos.y}px`;
-    }
-    onRemove() {
-      if (this.div) {
-        this.div.parentNode.removeChild(this.div);
-        this.div = null;
-      }
-    }
-  };
-
+function initMap() {
   const initialPlot = getActivePlot();
-  map = new google.maps.Map(document.getElementById("map"), {
-    center: initialPlot ? { lat: initialPlot.lat, lng: initialPlot.lng } : { lat: DEFAULT_LAT, lng: DEFAULT_LNG },
-    zoom: 16,
-    mapTypeId: "hybrid",
-  });
+  map = L.map("map").setView(
+    initialPlot ? [initialPlot.lat, initialPlot.lng] : [DEFAULT_LAT, DEFAULT_LNG],
+    16
+  );
+  const standardMap = L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a>',
+  }).addTo(map);
 
+  const lowZoomPhoto = L.tileLayer(
+    "https://cyberjapandata.gsi.go.jp/xyz/lndst/{z}/{x}/{y}.png",
+    {
+      minZoom: 9,
+      maxNativeZoom: 13,
+      maxZoom: 18,
+      attribution: '低ズーム画像: Landsat 8（GSI・TSIC・GEO Grid/AIST、USGS）、海底地形: GEBCO',
+    }
+  );
+  const aerialPhoto = L.tileLayer(
+    "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg",
+    {
+      minZoom: 14,
+      maxNativeZoom: 18,
+      maxZoom: 18,
+      attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル（全国最新写真）</a>',
+    }
+  );
+  const aerialPhotoLayer = L.layerGroup([lowZoomPhoto, aerialPhoto]);
+  const hillshade = L.tileLayer(
+    "https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png",
+    {
+      maxNativeZoom: 16,
+      maxZoom: 18,
+      opacity: 0.55,
+      attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル（陰影起伏図）</a>',
+    }
+  );
+  L.control.layers(
+    {
+      "標準地図": standardMap,
+      "航空写真": aerialPhotoLayer,
+    },
+    { "陰影起伏図": hillshade },
+    { position: "topright", collapsed: false }
+  ).addTo(map);
+
+  map.on("tileerror", () => {
+    el.mapError.textContent = "地理院タイルを読み込めません。ネットワーク接続を確認してください。";
+  });
 
   el.controls.hidden = false;
   renderTabs();
@@ -894,5 +868,5 @@ async function initMap(apiKey) {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  initMap(API_KEY);
+  initMap();
 });

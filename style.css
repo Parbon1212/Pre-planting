@@ -325,6 +325,28 @@ input:disabled {
   pointer-events: none;
 }
 
+.area-label-icon,
+.rotate-handle-icon {
+  border: 0;
+  background: transparent;
+}
+
+.rotate-handle {
+  display: block;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 2px solid var(--color-ember);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  cursor: grab;
+}
+
+.rotate-handle:active {
+  cursor: grabbing;
+}
+
 .tab-bar {
   display: flex;
   flex-wrap: wrap;
