@@ -44,6 +44,16 @@
         </div>
       </div>
 
+      <div class="card-block">
+        <h2 class="card-label">GeoTIFFオーバーレイ</h2>
+        <input type="file" id="geoTiffInput" accept=".tif,.tiff,.geotiff,image/tiff" hidden>
+        <div class="row">
+          <button type="button" class="btn btn-primary" id="geoTiffChooseBtn">GeoTIFFを選択</button>
+          <button type="button" class="btn btn-destructive" id="geoTiffRemoveBtn" hidden>削除</button>
+        </div>
+        <p class="hint geo-tiff-status" id="geoTiffStatus" role="status" aria-live="polite">未読み込み</p>
+      </div>
+
       <div class="card-block" id="baseFields">
         <h2 class="card-label">基準点</h2>
         <div class="row">
@@ -128,6 +138,9 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/georaster@1.6.0"></script>
+<script src="https://unpkg.com/proj4@2.11.0/dist/proj4.js"></script>
+<script src="https://unpkg.com/georaster-layer-for-leaflet@4.1.2"></script>
 <script src="app.js"></script>
 <script>
 (function () {

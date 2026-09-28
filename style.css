@@ -278,6 +278,10 @@ input:disabled {
   margin: 0;
 }
 
+.geo-tiff-status {
+  overflow-wrap: anywhere;
+}
+
 .lockable {
   display: flex;
   gap: 4px;

@@ -6,6 +6,7 @@ const PLOT_COLORS = [
 ];
 
 const MAX_DOTS = 2000; // 地図上に描画する点数の上限（多すぎるとブラウザが重くなるため）
+const MAX_MAP_ZOOM = 22;
 
 const DEFAULT_LAT = 32.88158479139884;
 const DEFAULT_LNG = 130.73541207830417;
@@ -56,11 +57,17 @@ function plotColor(plot) {
 }
 
 let map = null;
+let layerControl = null;
+let geoTiffLayer = null;
 const drawings = new Map(); // plotId -> { polygon, dotMarkers, label, marker }
 
 const el = {
   controls: document.getElementById("controls"),
   tabBar: document.getElementById("tabBar"),
+  geoTiffInput: document.getElementById("geoTiffInput"),
+  geoTiffChooseBtn: document.getElementById("geoTiffChooseBtn"),
+  geoTiffRemoveBtn: document.getElementById("geoTiffRemoveBtn"),
+  geoTiffStatus: document.getElementById("geoTiffStatus"),
   addRectPlotBtn: document.getElementById("addRectPlotBtn"),
   addDotsPlotBtn: document.getElementById("addDotsPlotBtn"),
   deletePlotBtn: document.getElementById("deletePlotBtn"),
@@ -290,12 +297,12 @@ function getRotateHandlePosition(plot) {
   );
 }
 
-// ドラッグ中・ドラッグ終了の両方で呼ぶ：基準点からカーソル方向への方位角を採用し、
-// この区画だけ軽量に再描画する（他区画・タブ一覧は触らない）。
-function onRotateHandleDrag(plot, e) {
+// ドラッグ中はカーソル位置を優先し、終了時だけハンドルを所定の半径へ戻す。
+function onRotateHandleDrag(plot, e, isFinal = false) {
+  const cursor = e.latlng || e.target.getLatLng();
   const latitude1 = (plot.lat * Math.PI) / 180;
-  const latitude2 = (e.latlng.lat * Math.PI) / 180;
-  const longitudeDelta = ((e.latlng.lng - plot.lng) * Math.PI) / 180;
+  const latitude2 = (cursor.lat * Math.PI) / 180;
+  const longitudeDelta = ((cursor.lng - plot.lng) * Math.PI) / 180;
   const bearingToCursor = (Math.atan2(
     Math.sin(longitudeDelta) * Math.cos(latitude2),
     Math.cos(latitude1) * Math.sin(latitude2) -
@@ -312,7 +319,7 @@ function onRotateHandleDrag(plot, e) {
     el.rotationInput.value = round2(newAngle);
   }
 
-  redrawPlot(plot); // ハンドル位置は半径固定で再計算されるため、弧の上にしか動かない
+  redrawPlot(plot, { syncRotateHandle: isFinal });
   updateResultBox();
 }
 
@@ -336,7 +343,7 @@ function syncRotateHandle(plot, d, color, isActive) {
       }),
     });
     d.rotateHandle.on("drag", (e) => onRotateHandleDrag(plot, e));
-    d.rotateHandle.on("dragend", (e) => onRotateHandleDrag(plot, e));
+    d.rotateHandle.on("dragend", (e) => onRotateHandleDrag(plot, e, true));
   }
   d.rotateHandle.setLatLng([handlePos.lat, handlePos.lng]);
   if (!map.hasLayer(d.rotateHandle)) d.rotateHandle.addTo(map);
@@ -348,7 +355,7 @@ function syncRotateHandle(plot, d, color, isActive) {
   }));
 }
 
-function redrawDotsPlot(plot, d, color, isActive) {
+function redrawDotsPlot(plot, d, color, isActive, syncRotationHandle) {
   if (d.polygon) {
     map.removeLayer(d.polygon);
     d.polygon = null;
@@ -382,7 +389,7 @@ function redrawDotsPlot(plot, d, color, isActive) {
   const centerLng = gridCorners.reduce((sum, corner) => sum + corner.lng, 0) / gridCorners.length;
   updateAreaLabel(d, [centerLat, centerLng], `${plotName(plot)}: ${plot.rows * plot.cols}点`, color, isActive);
 
-  syncRotateHandle(plot, d, color, isActive);
+  if (syncRotationHandle) syncRotateHandle(plot, d, color, isActive);
 }
 
 function updateAreaLabel(d, position, text, color, isActive) {
@@ -406,7 +413,7 @@ function updateAreaLabel(d, position, text, color, isActive) {
   if (!map.hasLayer(d.label)) d.label.addTo(map);
 }
 
-function redrawRectPlot(plot, d, color, isActive) {
+function redrawRectPlot(plot, d, color, isActive, syncRotationHandle) {
   if (d.dotMarkers && d.dotMarkers.length) {
     d.dotMarkers.forEach((marker) => map.removeLayer(marker));
     d.dotMarkers = [];
@@ -438,7 +445,7 @@ function redrawRectPlot(plot, d, color, isActive) {
     isActive
   );
 
-  syncRotateHandle(plot, d, color, isActive);
+  if (syncRotationHandle) syncRotateHandle(plot, d, color, isActive);
 }
 
 // 基準点マーカーのドラッグ中・ドラッグ終了の両方で呼ぶ：位置を更新してこの区画だけ軽量に再描画する。
@@ -451,7 +458,7 @@ function onBaseMarkerDrag(plot, e) {
   updateResultBox();
 }
 
-function redrawPlot(plot) {
+function redrawPlot(plot, { syncRotateHandle: shouldSyncRotateHandle = true } = {}) {
   const isActive = plot.id === activePlotId;
 
   let d = drawings.get(plot.id);
@@ -462,9 +469,9 @@ function redrawPlot(plot) {
 
   const color = plotColor(plot);
   if (plot.type === "dots") {
-    redrawDotsPlot(plot, d, color, isActive);
+    redrawDotsPlot(plot, d, color, isActive, shouldSyncRotateHandle);
   } else {
-    redrawRectPlot(plot, d, color, isActive);
+    redrawRectPlot(plot, d, color, isActive, shouldSyncRotateHandle);
   }
 
   // 基準点マーカーは方形・ドット共通（ドラッグで基準点を移動）
@@ -535,14 +542,18 @@ function updateTotalArea() {
   el.resultPlotCount.textContent = plots.length;
 }
 
-function fitAllPlots() {
-  if (plots.length === 0) return;
+function fitPlots(targetPlots) {
+  if (targetPlots.length === 0) return;
   const bounds = L.latLngBounds([]);
-  plots.forEach((plot) => {
+  targetPlots.forEach((plot) => {
     const corners = plot.type === "dots" ? computeDotGridCorners(plot) : computeCorners(plot);
     corners.forEach((corner) => bounds.extend([corner.lat, corner.lng]));
   });
-  map.fitBounds(bounds, { padding: [40, 40] });
+  map.fitBounds(bounds, { padding: [48, 48] });
+}
+
+function fitAllPlots() {
+  fitPlots(plots);
 }
 
 let dragSourcePlotId = null;
@@ -624,14 +635,15 @@ function selectPlot(id) {
 }
 
 function addPlot(type) {
-  const current = getActivePlot();
+  const center = map.getCenter();
   const newPlot = createPlot({
-    lat: current ? current.lat : DEFAULT_LAT,
-    lng: current ? current.lng : DEFAULT_LNG,
+    lat: center.lat,
+    lng: center.lng,
     type,
   });
   plots.push(newPlot);
   selectPlot(newPlot.id);
+  fitPlots([newPlot]);
 }
 
 function deletePlot() {
@@ -661,6 +673,61 @@ function wirePlotManagerEvents() {
   el.addRectPlotBtn.addEventListener("click", () => addPlot("rect"));
   el.addDotsPlotBtn.addEventListener("click", () => addPlot("dots"));
   el.deletePlotBtn.addEventListener("click", deletePlot);
+}
+
+function removeGeoTiffOverlay() {
+  if (geoTiffLayer) {
+    map.removeLayer(geoTiffLayer);
+    layerControl.removeLayer(geoTiffLayer);
+    geoTiffLayer = null;
+  }
+  el.geoTiffRemoveBtn.hidden = true;
+  el.geoTiffStatus.textContent = "未読み込み";
+  el.geoTiffStatus.classList.remove("error");
+}
+
+async function loadGeoTiff(file) {
+  el.geoTiffChooseBtn.disabled = true;
+  el.geoTiffStatus.classList.remove("error");
+  el.geoTiffStatus.textContent = `読み込み中: ${file.name}`;
+
+  try {
+    const georaster = await parseGeoraster(file);
+    const nextLayer = new GeoRasterLayer({
+      georaster,
+      opacity: 1,
+      resolution: 256,
+      maxZoom: MAX_MAP_ZOOM,
+    });
+
+    const bounds = nextLayer.getBounds();
+    if (!bounds || !bounds.isValid()) {
+      throw new Error("GeoTIFFから有効な地理範囲を取得できませんでした。");
+    }
+
+    removeGeoTiffOverlay();
+    geoTiffLayer = nextLayer;
+    layerControl.addOverlay(geoTiffLayer, "GeoTIFF");
+    geoTiffLayer.addTo(map);
+    map.fitBounds(bounds, { padding: [48, 48] });
+    el.geoTiffRemoveBtn.hidden = false;
+    el.geoTiffStatus.textContent = file.name;
+  } catch (error) {
+    el.geoTiffStatus.textContent = `読み込み失敗: ${error.message || error}`;
+    el.geoTiffStatus.classList.add("error");
+  } finally {
+    el.geoTiffChooseBtn.disabled = false;
+    el.geoTiffInput.value = "";
+  }
+}
+
+function wireGeoTiffEvents() {
+  el.geoTiffChooseBtn.addEventListener("click", () => el.geoTiffInput.click());
+  el.geoTiffInput.addEventListener("change", () => {
+    const file = el.geoTiffInput.files[0];
+    if (file) loadGeoTiff(file);
+  });
+  el.geoTiffRemoveBtn.addEventListener("click", removeGeoTiffOverlay);
 }
 
 function wireControlEvents() {
@@ -807,12 +874,13 @@ function wireControlEvents() {
 
 function initMap() {
   const initialPlot = getActivePlot();
-  map = L.map("map").setView(
+  map = L.map("map", { maxZoom: MAX_MAP_ZOOM }).setView(
     initialPlot ? [initialPlot.lat, initialPlot.lng] : [DEFAULT_LAT, DEFAULT_LNG],
     16
   );
   const standardMap = L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png", {
-    maxZoom: 18,
+    maxNativeZoom: 18,
+    maxZoom: MAX_MAP_ZOOM,
     attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a>',
   }).addTo(map);
 
@@ -821,7 +889,7 @@ function initMap() {
     {
       minZoom: 9,
       maxNativeZoom: 13,
-      maxZoom: 18,
+      maxZoom: MAX_MAP_ZOOM,
       attribution: '低ズーム画像: Landsat 8（GSI・TSIC・GEO Grid/AIST、USGS）、海底地形: GEBCO',
     }
   );
@@ -830,7 +898,7 @@ function initMap() {
     {
       minZoom: 14,
       maxNativeZoom: 18,
-      maxZoom: 18,
+      maxZoom: MAX_MAP_ZOOM,
       attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル（全国最新写真）</a>',
     }
   );
@@ -839,12 +907,12 @@ function initMap() {
     "https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png",
     {
       maxNativeZoom: 16,
-      maxZoom: 18,
+      maxZoom: MAX_MAP_ZOOM,
       opacity: 0.55,
       attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル（陰影起伏図）</a>',
     }
   );
-  L.control.layers(
+  layerControl = L.control.layers(
     {
       "標準地図": standardMap,
       "航空写真": aerialPhotoLayer,
@@ -863,6 +931,7 @@ function initMap() {
   syncLockUI();
   wireControlEvents();
   wirePlotManagerEvents();
+  wireGeoTiffEvents();
   redrawAll();
   fitAllPlots();
 }
