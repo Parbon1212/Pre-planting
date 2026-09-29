@@ -4,15 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>植林予定区画 検討ツール</title>
-<script>
-(function () {
-  try {
-    var stored = localStorage.getItem("theme");
-    var theme = stored || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    document.documentElement.setAttribute("data-theme", theme);
-  } catch (e) {}
-})();
-</script>
+<script src="theme.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -142,21 +134,5 @@
 <script src="https://unpkg.com/proj4@2.11.0/dist/proj4.js"></script>
 <script src="https://unpkg.com/georaster-layer-for-leaflet@4.1.2"></script>
 <script src="app.js"></script>
-<script>
-(function () {
-  var btn = document.getElementById("themeToggle");
-  function updateIcon(theme) {
-    btn.textContent = theme === "dark" ? "☀️" : "🌙";
-    btn.setAttribute("aria-label", theme === "dark" ? "ライトモードに切り替え" : "ダークモードに切り替え");
-  }
-  updateIcon(document.documentElement.getAttribute("data-theme") || "light");
-  btn.addEventListener("click", function () {
-    var next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", next);
-    try { localStorage.setItem("theme", next); } catch (e) {}
-    updateIcon(next);
-  });
-})();
-</script>
 </body>
 </html>
