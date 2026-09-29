@@ -698,6 +698,11 @@ async function loadGeoTiff(file) {
       opacity: 1,
       resolution: 256,
       maxZoom: MAX_MAP_ZOOM,
+      pixelValuesToColorFn: (values) => {
+        const alpha = values[3] ?? 255;
+        if (alpha === 0) return "rgba(0, 0, 0, 0)";
+        return `rgba(${values[0]}, ${values[1]}, ${values[2]}, ${alpha / 255})`;
+      },
     });
 
     const bounds = nextLayer.getBounds();
