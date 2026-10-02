@@ -63,6 +63,7 @@ const drawings = new Map(); // plotId -> { polygon, dotMarkers, label, marker }
 
 const el = {
   controls: document.getElementById("controls"),
+  mapError: document.getElementById("mapError"),
   tabBar: document.getElementById("tabBar"),
   geoTiffInput: document.getElementById("geoTiffInput"),
   geoTiffChooseBtn: document.getElementById("geoTiffChooseBtn"),
@@ -71,6 +72,8 @@ const el = {
   addRectPlotBtn: document.getElementById("addRectPlotBtn"),
   addDotsPlotBtn: document.getElementById("addDotsPlotBtn"),
   deletePlotBtn: document.getElementById("deletePlotBtn"),
+  exportJsonBtn: document.getElementById("exportJsonBtn"),
+  exportFileNameInput: document.getElementById("exportFileNameInput"),
   baseFields: document.getElementById("baseFields"),
   latInput: document.getElementById("latInput"),
   lngInput: document.getElementById("lngInput"),
@@ -131,23 +134,56 @@ function rotateOffset(x, y, rotationDeg) {
   return { x: rx, y: ry };
 }
 
+// 基準点から東(x)・北(y)方向のオフセット[m]だけ離れた地点の緯度経度。
+// WGS84楕円体上のVincenty順解法で求める（現場ナビ側のサーバー計算とmm単位で一致させるため）。
+const WGS84_A = 6378137;
+const WGS84_F = 1 / 298.257223563;
+const WGS84_B = WGS84_A * (1 - WGS84_F);
+
 function offsetToLatLng(base, x, y) {
   const distance = Math.sqrt(x * x + y * y);
-  const heading = Math.atan2(x, y);
-  const angularDistance = distance / 6378137;
-  const latitude = (base.lat * Math.PI) / 180;
-  const longitude = (base.lng * Math.PI) / 180;
-  const targetLatitude = Math.asin(
-    Math.sin(latitude) * Math.cos(angularDistance) +
-      Math.cos(latitude) * Math.sin(angularDistance) * Math.cos(heading)
+  if (distance === 0) return { lat: base.lat, lng: base.lng };
+
+  const alpha1 = Math.atan2(x, y); // 北から時計回りの方位角
+  const sinAlpha1 = Math.sin(alpha1);
+  const cosAlpha1 = Math.cos(alpha1);
+  const tanU1 = (1 - WGS84_F) * Math.tan((base.lat * Math.PI) / 180);
+  const cosU1 = 1 / Math.sqrt(1 + tanU1 * tanU1);
+  const sinU1 = tanU1 * cosU1;
+  const sigma1 = Math.atan2(tanU1, cosAlpha1);
+  const sinAlpha = cosU1 * sinAlpha1;
+  const cosSqAlpha = 1 - sinAlpha * sinAlpha;
+  const uSq = (cosSqAlpha * (WGS84_A * WGS84_A - WGS84_B * WGS84_B)) / (WGS84_B * WGS84_B);
+  const A = 1 + (uSq / 16384) * (4096 + uSq * (-768 + uSq * (320 - 175 * uSq)));
+  const B = (uSq / 1024) * (256 + uSq * (-128 + uSq * (74 - 47 * uSq)));
+
+  let sigma = distance / (WGS84_B * A);
+  let sigmaPrev;
+  let cos2SigmaM, sinSigma, cosSigma;
+  let iterations = 0;
+  do {
+    cos2SigmaM = Math.cos(2 * sigma1 + sigma);
+    sinSigma = Math.sin(sigma);
+    cosSigma = Math.cos(sigma);
+    const deltaSigma = B * sinSigma * (cos2SigmaM + (B / 4) * (cosSigma * (-1 + 2 * cos2SigmaM * cos2SigmaM) -
+      (B / 6) * cos2SigmaM * (-3 + 4 * sinSigma * sinSigma) * (-3 + 4 * cos2SigmaM * cos2SigmaM)));
+    sigmaPrev = sigma;
+    sigma = distance / (WGS84_B * A) + deltaSigma;
+  } while (Math.abs(sigma - sigmaPrev) > 1e-12 && ++iterations < 100);
+
+  const tmp = sinU1 * sinSigma - cosU1 * cosSigma * cosAlpha1;
+  const latitude2 = Math.atan2(
+    sinU1 * cosSigma + cosU1 * sinSigma * cosAlpha1,
+    (1 - WGS84_F) * Math.sqrt(sinAlpha * sinAlpha + tmp * tmp)
   );
-  const targetLongitude = longitude + Math.atan2(
-    Math.sin(heading) * Math.sin(angularDistance) * Math.cos(latitude),
-    Math.cos(angularDistance) - Math.sin(latitude) * Math.sin(targetLatitude)
-  );
+  const lambda = Math.atan2(sinSigma * sinAlpha1, cosU1 * cosSigma - sinU1 * sinSigma * cosAlpha1);
+  const C = (WGS84_F / 16) * cosSqAlpha * (4 + WGS84_F * (4 - 3 * cosSqAlpha));
+  const L = lambda - (1 - C) * WGS84_F * sinAlpha *
+    (sigma + C * sinSigma * (cos2SigmaM + C * cosSigma * (-1 + 2 * cos2SigmaM * cos2SigmaM)));
+
   return {
-    lat: (targetLatitude * 180) / Math.PI,
-    lng: (targetLongitude * 180) / Math.PI,
+    lat: (latitude2 * 180) / Math.PI,
+    lng: base.lng + (L * 180) / Math.PI,
   };
 }
 
@@ -175,16 +211,25 @@ function computeDotGridCorners(plot) {
   return computeCornersFromDims(plot, width, height, plot.azimuth);
 }
 
-// ドット1点ずつの座標（基準点=原点、東方向に列、北方向に行）。MAX_DOTSで打ち切る。
-function computeDotPositions(plot) {
+// 植林番号。基準点を1とし、列ごとに北へ・南へと折り返して数える（蛇行順）。
+// 例: 3行×3列なら 上段 3 4 9 / 中段 2 5 8 / 下段 1 6 7
+function plantingNumber(row, col, rows) {
+  const rowInCol = col % 2 === 0 ? row : rows - 1 - row;
+  return col * rows + rowInCol + 1;
+}
+
+// ドット1点ずつの座標（基準点=原点、東方向に列、北方向に行）。limit点で打ち切る。
+function computeDotPositions(plot, limit = MAX_DOTS) {
   const rows = Math.max(1, Math.round(plot.rows));
   const cols = Math.max(1, Math.round(plot.cols));
   const points = [];
   outer: for (let i = 0; i < rows; i++) {
     for (let j = 0; j < cols; j++) {
-      if (points.length >= MAX_DOTS) break outer;
+      if (points.length >= limit) break outer;
       const rotated = rotateOffset(j * plot.colSpacing, i * plot.rowSpacing, plot.azimuth);
-      points.push(offsetToLatLng(plot, rotated.x, rotated.y));
+      const pos = offsetToLatLng(plot, rotated.x, rotated.y);
+      pos.number = plantingNumber(i, j, rows);
+      points.push(pos);
     }
   }
   return points;
@@ -567,6 +612,7 @@ function renderTabs() {
     hint.textContent = "区画がありません。下のボタンから追加してください。";
     el.tabBar.appendChild(hint);
     el.deletePlotBtn.disabled = true;
+    el.exportJsonBtn.disabled = true;
     return;
   }
 
@@ -611,6 +657,7 @@ function renderTabs() {
     el.tabBar.appendChild(btn);
   });
   el.deletePlotBtn.disabled = false;
+  el.exportJsonBtn.disabled = false;
 }
 
 function reorderPlots(sourceId, targetId) {
@@ -669,7 +716,69 @@ function deletePlot() {
   redrawAll();
 }
 
+// 入力されたファイル名から使えない文字を除き、指定の拡張子を補う。空なら既定名にする。
+function exportFileName(ext) {
+  let name = el.exportFileNameInput.value.trim().replace(/[\\/:*?"<>|]/g, "_");
+  name = name.replace(/\.json$/i, "");
+  return (name || "植林座標") + ext;
+}
+
+function downloadFile(content, type, fileName) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// 区画の出力用の点列（番号付き）。ドットは全点（表示上限なし）を植林番号順に、
+// 方形は4隅を画面の一覧と同じ順（基準点=1）で返す。
+function exportPoints(plot) {
+  return plot.type === "dots"
+    ? computeDotPositions(plot, Infinity).sort((a, b) => a.number - b.number)
+    : computeCorners(plot).map((c, idx) => ({ ...c, number: idx + 1 }));
+}
+
+// 現場ナビ（Geo Field Studio）用のJSONを書き出す。
+// - corners: ナビの到達順に並べた [経度, 緯度] の配列（ナビ側の corners と同じ形式）
+// - params: ドット区画のみ。ナビの POST /calculate にそのまま渡せる値
+//   （縦=北方向=行、横=東方向=列。ナビ側も基準点から北へ進み列ごとに折り返す順で、計算結果は一致する）
+function exportNaviJson() {
+  if (plots.length === 0) return;
+
+  const data = {
+    format: "geo-field-studio-plan",
+    version: 1,
+    exported_at: new Date().toISOString(),
+    plots: plots.map((plot) => ({
+      name: plotName(plot),
+      type: plot.type,
+      params: plot.type === "dots"
+        ? {
+            shape: "tree",
+            cp_lat: String(plot.lat),
+            cp_lon: String(plot.lng),
+            azimuth_mode: "manual",
+            manual_azimuth: normalizeAngle(plot.azimuth),
+            tree_space_height: plot.rowSpacing,
+            tree_space_width: plot.colSpacing,
+            tree_height: Math.max(1, Math.round(plot.rows)),
+            tree_width: Math.max(1, Math.round(plot.cols)),
+          }
+        : null,
+      corners: exportPoints(plot).map((pt) => [pt.lng, pt.lat]),
+    })),
+  };
+
+  downloadFile(JSON.stringify(data, null, 2), "application/json", exportFileName(".json"));
+}
+
 function wirePlotManagerEvents() {
+  el.exportJsonBtn.addEventListener("click", exportNaviJson);
   el.addRectPlotBtn.addEventListener("click", () => addPlot("rect"));
   el.addDotsPlotBtn.addEventListener("click", () => addPlot("dots"));
   el.deletePlotBtn.addEventListener("click", deletePlot);
