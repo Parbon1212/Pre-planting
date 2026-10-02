@@ -4,9 +4,4 @@
 
 ## サイトURL
 
-| 公開先 | URL |
-| --- | --- |
-| 森林総研サーバー | http://ftbc-public1.ffpri.go.jp/pre_planting/ |
-| GitHub Pages | https://parbon1212.github.io/Pre-planting/ |
-
-森林総研サーバーへの配置手順は [deploy/README.md](deploy/README.md) を参照してください。
+https://parbon1212.github.io/Pre-planting/
