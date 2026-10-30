@@ -401,15 +401,20 @@ function syncRotateHandle(plot, d, color, isActive) {
 }
 
 function redrawDotsPlot(plot, d, color, isActive, syncRotationHandle) {
-  if (d.polygon) {
+  const gridCorners = computeDotGridCorners(plot);
+
+  // 点数が上限を超える場合は、点を描かずに方形区画と同じくグリッド範囲を多角形で描画する
+  const total = Math.max(1, Math.round(plot.rows)) * Math.max(1, Math.round(plot.cols));
+  const overCap = total > MAX_DOTS;
+  if (overCap) {
+    drawPlotPolygon(d, gridCorners, color, isActive);
+  } else if (d.polygon) {
     map.removeLayer(d.polygon);
     d.polygon = null;
   }
 
-  // 点数が上限を超える場合は、グリッドの4隅だけを描画する。
   // 先頭の点（基準点そのもの）はドラッグ用マーカーと重なるため描画対象から除く
-  const total = Math.max(1, Math.round(plot.rows)) * Math.max(1, Math.round(plot.cols));
-  const points = (total > MAX_DOTS ? computeDotGridCorners(plot) : computeDotPositions(plot)).slice(1);
+  const points = overCap ? [] : computeDotPositions(plot).slice(1);
 
   if (!d.dotMarkers) d.dotMarkers = [];
   while (d.dotMarkers.length < points.length) {
@@ -431,7 +436,6 @@ function redrawDotsPlot(plot, d, color, isActive, syncRotationHandle) {
     });
   });
 
-  const gridCorners = computeDotGridCorners(plot);
   const centerLat = gridCorners.reduce((sum, corner) => sum + corner.lat, 0) / gridCorners.length;
   const centerLng = gridCorners.reduce((sum, corner) => sum + corner.lng, 0) / gridCorners.length;
   updateAreaLabel(d, [centerLat, centerLng], `${plotName(plot)}: ${plot.rows * plot.cols}点`, color, isActive);
@@ -460,13 +464,8 @@ function updateAreaLabel(d, position, text, color, isActive) {
   if (!map.hasLayer(d.label)) d.label.addTo(map);
 }
 
-function redrawRectPlot(plot, d, color, isActive, syncRotationHandle) {
-  if (d.dotMarkers && d.dotMarkers.length) {
-    d.dotMarkers.forEach((marker) => map.removeLayer(marker));
-    d.dotMarkers = [];
-  }
-
-  const corners = computeCorners(plot);
+// 区画の範囲を多角形で描画する（方形区画、および点数上限を超えたドット区画）
+function drawPlotPolygon(d, corners, color, isActive) {
   const style = isActive
     ? { weight: 3, opacity: 1, fillOpacity: 0.35 }
     : { weight: 1.5, opacity: 0.6, fillOpacity: 0.12 };
@@ -481,6 +480,16 @@ function redrawRectPlot(plot, d, color, isActive, syncRotationHandle) {
     d.polygon.setLatLngs(corners.map((corner) => [corner.lat, corner.lng]));
     d.polygon.setStyle({ color, fillColor: color, ...style });
   }
+}
+
+function redrawRectPlot(plot, d, color, isActive, syncRotationHandle) {
+  if (d.dotMarkers && d.dotMarkers.length) {
+    d.dotMarkers.forEach((marker) => map.removeLayer(marker));
+    d.dotMarkers = [];
+  }
+
+  const corners = computeCorners(plot);
+  drawPlotPolygon(d, corners, color, isActive);
 
   const centerLat = corners.reduce((sum, corner) => sum + corner.lat, 0) / corners.length;
   const centerLng = corners.reduce((sum, corner) => sum + corner.lng, 0) / corners.length;
