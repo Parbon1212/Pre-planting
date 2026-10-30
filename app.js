@@ -406,8 +406,10 @@ function redrawDotsPlot(plot, d, color, isActive, syncRotationHandle) {
     d.polygon = null;
   }
 
+  // 点数が上限を超える場合は、グリッドの4隅だけを描画する。
   // 先頭の点（基準点そのもの）はドラッグ用マーカーと重なるため描画対象から除く
-  const points = computeDotPositions(plot).slice(1);
+  const total = Math.max(1, Math.round(plot.rows)) * Math.max(1, Math.round(plot.cols));
+  const points = (total > MAX_DOTS ? computeDotGridCorners(plot) : computeDotPositions(plot)).slice(1);
 
   if (!d.dotMarkers) d.dotMarkers = [];
   while (d.dotMarkers.length < points.length) {
